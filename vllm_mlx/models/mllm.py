@@ -272,8 +272,25 @@ def _build_mllm_chat_messages(
             all_image_urls=all_image_urls,
             video_frame_count=video_frame_counts.get(msg_idx, 0),
         )
+        # Preserve tool round-trip metadata so a tool-aware chat template (e.g. Gemma-4's
+        # native template, loaded by mlx-vlm >=0.6.3) can render assistant tool_calls and
+        # role:"tool" results. Without this, _template_supports_tool_role() returning True
+        # (the native path) silently drops tool state → repeated calls / rounds_exhausted.
+        out_msg: dict = {"role": role}
+        has_tool_meta = False
+        for key in ("tool_calls", "tool_call_id", "tool_responses", "name",
+                    "reasoning", "reasoning_content"):
+            if msg.get(key) is not None:
+                out_msg[key] = msg[key]
+                if key in ("tool_calls", "tool_call_id", "tool_responses"):
+                    has_tool_meta = True
         if has_content:
-            chat_messages.append({"role": role, "content": content})
+            out_msg["content"] = content
+        elif role == "tool" or has_tool_meta:
+            out_msg["content"] = content  # keep the turn even when content is ""
+        else:
+            continue  # genuinely empty non-tool message — drop (unchanged behaviour)
+        chat_messages.append(out_msg)
     return chat_messages
 
 
