@@ -32,6 +32,7 @@ from urllib.parse import urljoin, urlparse
 import numpy as np
 import requests
 
+from vllm_mlx.engine.chat_template_safety import normalize_messages_for_chat_template
 from vllm_mlx.mllm_cache import MLLMPrefixCacheManager
 
 logger = logging.getLogger(__name__)
@@ -253,6 +254,21 @@ def _build_ordered_mllm_message_content(
     return built_parts, bool(built_parts)
 
 
+def _normalize_mllm_tool_calls(tool_calls: list) -> list:
+    """Normalize replayed assistant tool calls for chat templates.
+
+    Mirrors ``_normalize_tool_call_arguments_for_template`` in
+    ``vllm_mlx/engine/batched.py``: JSON argument strings become mappings so
+    templates that iterate argument keys render correctly (parity with
+    waybarrios/vllm-mlx#611 on the native-template path).
+    """
+    plain_calls = [_normalize_content_part(call) for call in tool_calls]
+    normalized = normalize_messages_for_chat_template(
+        [{"role": "assistant", "tool_calls": plain_calls}]
+    )
+    return normalized[0].get("tool_calls", plain_calls)
+
+
 def _build_mllm_chat_messages(
     messages: list[dict],
     *,
@@ -281,7 +297,10 @@ def _build_mllm_chat_messages(
         for key in ("tool_calls", "tool_call_id", "tool_responses", "name",
                     "reasoning", "reasoning_content"):
             if msg.get(key) is not None:
-                out_msg[key] = msg[key]
+                value = msg[key]
+                if key == "tool_calls" and isinstance(value, list) and value:
+                    value = _normalize_mllm_tool_calls(value)
+                out_msg[key] = value
                 if key in ("tool_calls", "tool_call_id", "tool_responses"):
                     has_tool_meta = True
         if has_content:
