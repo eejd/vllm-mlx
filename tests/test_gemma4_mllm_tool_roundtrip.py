@@ -187,3 +187,96 @@ def test_non_tool_messages_unchanged():
     ]
     serialized = _serialize_tool_messages_gemma_native(messages)
     assert serialized == messages
+
+
+# ---------------------------------------------------------------------------
+# _build_mllm_chat_messages — arg-normalization (parity with #611 native path)
+# ---------------------------------------------------------------------------
+
+def test_build_mllm_chat_messages_normalizes_json_string_args():
+    """tool_calls.function.arguments JSON string → mapping on the native path.
+
+    Parity with waybarrios/vllm-mlx#611: templates that iterate argument keys
+    break when arguments is a raw JSON string. _normalize_mllm_tool_calls must
+    parse it to a dict before the message is forwarded to the chat template.
+    """
+    messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "arguments": '{"city": "Lima"}',
+                    },
+                }
+            ],
+            "reasoning_content": "User wants the weather.",
+        }
+    ]
+    result = _build_mllm_chat_messages(
+        messages, all_image_urls=[], video_frame_counts={}
+    )
+    assert len(result) == 1
+    out = result[0]
+    assert out["role"] == "assistant"
+    # arguments must be a dict, not a raw JSON string
+    fn = out["tool_calls"][0]["function"]
+    assert fn["arguments"] == {"city": "Lima"}, (
+        "arguments should be parsed to a mapping; got: " + repr(fn["arguments"])
+    )
+    # reasoning_content must survive the round-trip
+    assert out.get("reasoning_content") == "User wants the weather."
+
+
+def test_build_mllm_chat_messages_normalizes_malformed_args_without_raising():
+    """Malformed/non-JSON arguments pass through without raising (fallback)."""
+    messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "noop",
+                        "arguments": "not-valid-json!!!",
+                    },
+                }
+            ],
+        }
+    ]
+    # Must not raise
+    result = _build_mllm_chat_messages(
+        messages, all_image_urls=[], video_frame_counts={}
+    )
+    assert len(result) == 1
+    fn = result[0]["tool_calls"][0]["function"]
+    # normalize_messages_for_chat_template wraps bad JSON in {"value": ...}
+    assert isinstance(fn["arguments"], dict)
+
+
+def test_build_mllm_chat_messages_already_dict_args_unchanged():
+    """Arguments that are already a mapping are left as-is (idempotent)."""
+    args = {"city": "Lima", "units": "metric"}
+    messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": args},
+                }
+            ],
+        }
+    ]
+    result = _build_mllm_chat_messages(
+        messages, all_image_urls=[], video_frame_counts={}
+    )
+    assert result[0]["tool_calls"][0]["function"]["arguments"] == args
